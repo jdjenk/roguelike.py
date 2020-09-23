@@ -35,7 +35,7 @@ turn_counter = 0
 class Object:
     #this is a generic object: the player, a monster, an item, the stairs...
     #it's always represented by a character on screen.
-    def __init__(self, x, y, char, name, color, blocks=False, fighter=None, ai=None, Item=None, always_visible=False, speed=None, action_points=None, Equipment = None, Status = None):
+    def __init__(self, x, y, char, name, color, blocks=False, fighter=None, ai=None, Item=None, always_visible=False, speed=None, action_points=None, Equipment = None, Status = None, no_fog = False):
         self.x = x
         self.y = y
         self.char = char
@@ -49,6 +49,7 @@ class Object:
         self.action_points = action_points
         self.Equipment = Equipment
         self.Status = Status
+        self.no_fog = no_fog
         
         if self.fighter:  #let the fighter component know who owns it
             self.fighter.owner = self
@@ -76,7 +77,7 @@ class Object:
         self.y += dy
     def draw(self):
         #only show if it's visible to the player
-        if tcod.map_is_in_fov(fov_map, self.x, self.y) or (self.always_visible and map[self.x][self.y].explored):
+        if tcod.map_is_in_fov(fov_map, self.x, self.y) or (self.always_visible and map[self.x][self.y].explored) or self.no_fog is True:
             #set the color and then draw the character that represents this object at its position
             tcod.console_set_default_foreground(con, self.color)
             tcod.console_put_char(con, self.x, self.y, self.char, tcod.BKGND_NONE)
@@ -243,16 +244,17 @@ def shoot(self):
             
 
 class Status:
-    global turn_counter
-    def __init__(self, duration, status_effect, status_clear_function, end_time = None ):
+    global turn_counter, fov_recompute
+    def __init__(self, duration, status_effect, status_clear_function, end_time = None, dot = False ):
         self.duration = duration 
         self.end_time = duration+turn_counter
         self.status_effect = status_effect
         self.status_clear_function = status_clear_function
+        self.dot = dot
         
         
         
-        #why dont you work
+        
         
     def clear(object):
         object.Status.status_clear_function(object)  
@@ -260,9 +262,68 @@ class Status:
     def fast(self):
         self.speed -= 500
         
-
+    def random_teleport():
+        global fov_recompute, player
+        inventory[item_selection].Item.user = player
+        x = tcod.random_get_int(0,0,MAP_WIDTH)
+        y = tcod.random_get_int(0,0,MAP_HEIGHT)
+        while is_blocked(x,y):
+            x = tcod.random_get_int(0, 0, MAP_WIDTH)
+            y = tcod.random_get_int(0, 0, MAP_HEIGHT)
+        player.x = x
+        player.y = y
+        fov_recompute = True
+        render_all()
+        tcod.console_flush()
+        for object in objects:
+            object.clear()
     def fast_clear(self):
         self.speed += 500
+    def accurate(self):
+        self.fighter.accuracy += 20
+        self.fighter.shoot_accuracy += 20
+    def accurate_clear(self):
+        self.fighter.accuracy -= 20
+        self.fighter.shoot_accuracy -= 20
+    def Sensed(self):
+        Sensed = Status(4, 'No_fog', status_clear_function = Status.temp_telepathy_clear)
+        self.no_fog = True
+        self.Status = Sensed
+    def Detected(self):
+        Detected = Status(4, 'Detected', status_clear_function = Status.object_detection_clear)
+        self.no_fog = True
+        self.Status = Detected
+    def temp_telepathy():
+        for object in objects:
+            if object.ai:
+                object = Status.Sensed(object)
+    def object_detection():
+        for object in objects:
+            if object.Item:
+                object = Status.Detected(object)
+    def object_detection_clear(object):
+        object.Status = None
+    def temp_telepathy_clear(object):
+            object.no_fog = False
+            object.Status = None
+    def time_stop(self):
+        global old_speed
+        old_speed = self.speed
+        self.action_points = 0
+        self.speed = 0
+    def time_stop_clear(self):
+        self.speed = old_speed
+    def poison(self):
+        damage = 4
+        if self.fighter is not None and self.Status is not None:
+            self.fighter.take_damage(damage)
+            message (self.name.capitalize() + ' takes ' + str(damage) + ' from poison!')
+            
+    def poison_clear(self):
+        #doesnt have to do anything?
+        self.Status = None
+        
+
 
 
               
@@ -275,7 +336,7 @@ class Tile:
         self.block_sight = block_sight
  
 class Fighter:
-    def __init__(self, hp, defense, power, accuracy, death_function=None, shoot_power = 0, will = 0, dodge = 0):
+    def __init__(self, hp, defense, power, accuracy, shoot_accuracy = 0, death_function=None, shoot_power = 0, will = 0, dodge = 0):
         self.max_hp = hp
         self.hp = hp
         self.defense = defense
@@ -285,6 +346,7 @@ class Fighter:
         self.will = will
         self.dodge = dodge
         self.accuracy = accuracy
+        self.shoot_accuracy = shoot_accuracy
     def attack(self, target):
         hit_chance = self.accuracy - target.fighter.dodge
         hit_roll = tcod.random_get_int(0,0,100)
@@ -301,7 +363,7 @@ class Fighter:
         else:
             message (self.owner.name.capitalize() + ' attacks ' + target.name + ' but it has no effect!')
     def shoot_attack(self, target):
-        hit_chance = self.accuracy - target.fighter.dodge
+        hit_chance = self.shoot_accuracy - target.fighter.dodge
         hit_roll = tcod.random_get_int(0,0,100)
         damage = self.shoot_power - target.fighter.defense
         if hit_roll > hit_chance:
@@ -346,12 +408,48 @@ class BasicMonster:
             elif player.fighter.hp > 0:
                 monster.fighter.attack(player)  
         monster.action_points += monster.speed
- 
+def aoe_check(radius, target):
+    global targets
+    targets = []
+    los_blocked = False
+    c=0
+    for object in objects:
+        if Object.distance_to(object, cursor) <= radius and object.fighter:
+            line = tcod.los.bresenham((cursor.x, cursor.y), (object.x, object.y)).tolist()
+            for i in line:
+                if c == 0:
+                    c+=1
+                    continue
+                line_x = i[0]
+                line_y = i[1]
+                if is_blocked(line_x, line_y, monster_check = False):
+                    los_blocked = True
+            if los_blocked is True:
+                break
+            else:
+                if object.fighter:
+                    targets.append(object)
+            
+def grenade_cleanup(self):
+        try:
+            targets.clear()
+            objects.remove(cursor)
+            player.action_points += player.speed
+            inventory.remove(self.owner)
+        except:
+            print('Fire cancelled')
+def grenade_toss():
+    message('Attack what tile?',tcod.white)
+    render_all()
+    tcod.console_flush()
+    Object.look(cursor)
+    
 class Item:
-    def __init__ (self, use_function = None, user = None):
+    def __init__ (self, use_function = None, throw_function = None, user = None):
         
        
         self.use_function = use_function
+        self.throw_function = throw_function
         self.user = user
 
 
@@ -359,13 +457,32 @@ class Item:
         if self.owner.Equipment:
             self.owner.Equipment.toggle_equip()
             return
+        elif self.throw_function is not None:
+            self.throw_function(self)
         elif self.use_function is None:
             message('The ' + self.owner.name + 'cannot be used.')
         else:
             if self.use_function() != 'cancelled':
                 inventory.remove(self.owner)
  
-       
+    def frag_grenade(self):
+        grenade_toss()
+        aoe_check(2,cursor)
+        damage = 4
+        for target in targets:
+            target.fighter.take_damage(damage)
+            message ('Frag grenade' + ' hits ' + target.name + ' for ' + str(damage) + ' hit points.')
+        
+        grenade_cleanup(self)
+    def poison_grenade(self):
+        grenade_toss()
+        aoe_check(2,cursor)
+        for target in targets:
+            poison = Status(4, status_effect = Status.poison, status_clear_function= Status.poison_clear, dot = True)
+            target.Status = poison
+           
+        grenade_cleanup(self)
+
     def cast_heal():
         if user.fighter.hp == user.fighter.max_hp:
             message ('You are already at full health!', tcod.red)
@@ -375,9 +492,13 @@ class Item:
         player.fighter.heal(4)
     def speed_up():
         Fast = Status(4,status_effect = Status.fast(inventory[item_selection].Item.user),status_clear_function = Status.fast_clear)
-        player.Status = Fast
-        
-        
+        inventory[item_selection].Item.user.Status = Fast
+    def accuracy_up():
+        Accurate = Status(4, status_effect =  Status.accurate(inventory[item_selection].Item.user), status_clear_function = Status.accurate_clear)
+        inventory[item_selection].Item.user.Status = Accurate
+    def time_stop_use():
+        TimeStopped = Status(4, status_effect = Status.time_stop(inventory[item_selection].Item.user),status_clear_function = Status.time_stop_clear)
+        inventory[item_selection].Item.user.Status = TimeStopped
         
 
 
@@ -517,9 +638,7 @@ def handle_keys():
                 elif event.scancode == tcod.event.SCANCODE_X:
                     Object.look(cursor)
             elif event.type != 'KEYDOWN':
-               
-                player_action = 'didnt_take_turn'  
-                   
+               tcod.event.wait()
    
 def next_level():
     global dungeon_level, map
@@ -678,11 +797,11 @@ def render_all():
    
     # Blit con to root console
     tcod.console_blit(panel, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, PANEL_Y)
-def is_blocked(x, y):
+def is_blocked(x, y, monster_check = None):
     if map[x][y].blocked:
         return True
     for object in objects:
-        if object.blocks and object.x == x and object.y == y:
+        if object.blocks and object.x == x and object.y == y and monster_check is None:
             return True
     return False
 
@@ -704,11 +823,33 @@ monster_dict = {0:troll, 1:orc}
 #ITEMS BLOCK
 #CANISTERS
 def healing_canister():
-    healing_canister = Object(0,0,'!', 'healing canister', tcod.violet,always_visible=True, Item=Item(use_function=Item.cast_heal))
+    healing_canister = Object(0,0,'!', 'healing canister', tcod.light_red,always_visible=True, Item=Item(use_function=Item.cast_heal))
     return healing_canister
 def speed_canister():
     speed_canister = Object(0,0,'!', 'speed canister', tcod.green,always_visible=True, Item=Item(use_function=Item.speed_up))
     return speed_canister
+def accuracy_canister():
+    accuracy_canister = Object(0,0,'!', 'speed canister', tcod.yellow,always_visible=True, Item=Item(use_function=Item.accuracy_up))
+    return accuracy_canister
+def telepathy_canister():
+    telepathy_canister = Object(0,0,'!', 'telepathy canister', tcod.red,always_visible=True, Item=Item(use_function=Status.temp_telepathy))
+    return telepathy_canister
+def displacement_canister():
+    displacement_canister = Object(0,0,'!','displacement canister', tcod.light_green, always_visible = True, Item=Item(use_function = Status.random_teleport))
+    return displacement_canister
+def object_detection_canister():
+    object_detection_canister = Object(0,0,'!','object detection canister',tcod.blue,always_visible = True, Item=Item(use_function = Status.object_detection))
+    return object_detection_canister
+def time_stop_canister():
+    time_stop_canister = Object(0,0,'!','time stop canister',tcod.violet,always_visible = True, Item=Item(use_function = Item.time_stop_use))
+    return time_stop_canister
+#GRENADES
+def frag_grenade():
+    frag_grenade = Object(0,0,'*','frag_grenade',tcod.yellow, always_visible = True, Item=Item(throw_function = Item.frag_grenade))
+    return frag_grenade
+def poison_grenade():
+    poison_grenade = Object(0,0,'*','poison grenade',tcod.light_green, always_visible = True, Item=Item(throw_function = Item.poison_grenade))
+    return poison_grenade
 #WEAPONS
 def katana():
     katana = Object(0,0,'/','Katana',tcod.white, Item=Item(), Equipment=Equipment('right_hand'))
@@ -716,7 +857,10 @@ def katana():
 
 
 
-item_chances = ([0, katana],[0, healing_canister], [100, speed_canister])
+item_chances = (
+    [0, katana],[0, healing_canister], [0, speed_canister], [0, accuracy_canister], [0, telepathy_canister], [0, displacement_canister], [0, object_detection_canister],
+    [0, time_stop_canister], [0, frag_grenade], [100, poison_grenade]
+)
 monster_chances = ([80, orc],[20, troll])
 item_table = []
 monster_table = []
@@ -879,7 +1023,7 @@ def inventory_menu_drop(header):
 def new_game():
     global player, inventory, game_msgs, game_state, objects, cursor, dungeon_level, equipment
  
-    fighter_component = Fighter(5000,2,5, death_function = player_death, shoot_power = 4, accuracy = 100, dodge = 50)
+    fighter_component = Fighter(5000,2,5, death_function = player_death, shoot_power = 4, accuracy = 100, dodge = 50, shoot_accuracy = 100)
     player = Object(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2, '@','player', tcod.white, blocks=True, fighter=fighter_component, speed=1000, action_points=0)
     objects = [player]
    
@@ -945,6 +1089,8 @@ def check_status_effects():
                 
                 Status.clear(object)
                 object.Status = None
+            elif object.Status.dot is not False:
+                    object.Status.status_effect(object)
             
 
 
