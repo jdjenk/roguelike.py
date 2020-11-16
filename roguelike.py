@@ -31,11 +31,13 @@ fullscreen = False
 con = tcod.console_new(SCREEN_WIDTH,SCREEN_HEIGHT)
 panel = tcod.console_new(SCREEN_WIDTH, PANEL_HEIGHT)
 turn_counter = 0
+status_objects = []
 
 class Object:
     #this is a generic object: the player, a monster, an item, the stairs...
     #it's always represented by a character on screen.
-    def __init__(self, x, y, char, name, color, blocks=False, fighter=None, ai=None, Item=None, always_visible=False, speed=None, action_points=None, Equipment = None, Status = None, no_fog = False):
+    def __init__(self, x, y, char, name, color, blocks=False, fighter=None, ai=None, Item=None, always_visible=False, speed=None, 
+    action_points=None, Equipment = None, Status = None, no_fog = False):
         self.x = x
         self.y = y
         self.char = char
@@ -71,6 +73,9 @@ class Object:
         if not is_blocked(self.x + dx,self.y + dy):
             self.x += dx
             self.y += dy
+        if map[self.x][self.y].Status is not None:
+            map[self.x][self.y].Status.status_effect(self)
+            status_objects.append(self)
     def move_noblock(self, dx, dy):
         #move by the given amount, if the destination is not blocked
         self.x += dx
@@ -198,6 +203,9 @@ class Object:
             else:
                 self.move_towards(target.x, target.y)
             tcod.path_delete(my_path)
+        if map[self.x][self.y].Status is not None:
+            map[self.x][self.y].Status.status_effect(self)
+            status_objects.append(self)
     def refresh_action(self):
         if self.action_points is not None:
             if self.action_points > 0:
@@ -254,8 +262,19 @@ class Status:
         
         
         
-        
-        
+    def burning_clear(self):
+        self.Status = None
+    def burning(self):
+        damage = 3
+        if self.fighter is not None and self.Status is not None:
+            self.fighter.take_damage(damage)
+            message (self.name.capitalize() + ' takes ' + str(damage) + ' from fire!')
+    def tile_burning(self):
+        on_fire = Status(4,Status.burning,Status.burning_clear,dot = True)
+        self.Status = on_fire
+    def tile_burning_clear(self):
+        self.color = color_light_ground
+        self.Status = None
     def clear(object):
         object.Status.status_clear_function(object)  
 
@@ -297,6 +316,7 @@ class Status:
         for object in objects:
             if object.ai:
                 object = Status.Sensed(object)
+                status_objects.append(object)
     def object_detection():
         for object in objects:
             if object.Item:
@@ -307,33 +327,42 @@ class Status:
             object.no_fog = False
             object.Status = None
     def time_stop(self):
-        global old_speed
-        old_speed = self.speed
+        global player_old_speed
+        player_old_speed = self.speed
         self.action_points = 0
         self.speed = 0
     def time_stop_clear(self):
-        self.speed = old_speed
+        self.speed = player_old_speed
     def poison(self):
         damage = 4
         if self.fighter is not None and self.Status is not None:
             self.fighter.take_damage(damage)
             message (self.name.capitalize() + ' takes ' + str(damage) + ' from poison!')
+    def webbed_clear(self):
+        self.Status = None
             
     def poison_clear(self):
         #doesnt have to do anything?
         self.Status = None
-        
+    def slow(self, slow_amount, action_points):
+        self.speed = slow_amount
+        self.action_points = action_points
+    def slow_clear(self):
+        self.action_points = 0
+        self.speed = self.Status.status_effect
 
 
 
               
 class Tile:
-    def __init__(self, blocked ,block_sight = None):
+    def __init__(self, blocked, color = color_light_ground, block_sight = None, Status = None):
         self.blocked = blocked
         self.explored = False
+        self.color = color
         #by default if tile is blocked, blocks sight
         if block_sight is None: block_sight=blocked
         self.block_sight = block_sight
+        self.Status = Status
  
 class Fighter:
     def __init__(self, hp, defense, power, accuracy, shoot_accuracy = 0, death_function=None, shoot_power = 0, will = 0, dodge = 0):
@@ -404,13 +433,15 @@ class BasicMonster:
         monster = self.owner
         if tcod.map_is_in_fov(fov_map, monster.x, monster.y):
             if monster.distance_to(player) >= 2:
-                monster.move_astar(player)
+                if monster.Status is None or monster.Status.status_effect is not 'Webbed':
+                    monster.move_astar(player)
             elif player.fighter.hp > 0:
-                monster.fighter.attack(player)  
+                    monster.fighter.attack(player)  
         monster.action_points += monster.speed
-def aoe_check(radius, target):
-    global targets
+def aoe_check(radius,map_check = False):
+    global targets, map_targets
     targets = []
+    map_targets = []
     los_blocked = False
     c=0
     for object in objects:
@@ -429,6 +460,11 @@ def aoe_check(radius, target):
             else:
                 if object.fighter:
                     targets.append(object)
+    if map_check is not False:
+        for x in range ((radius*2+1)):
+            for y in range ((radius*2+1)):
+                #if map[cursor.x-2][cursor.y-2] is Tile:
+                map_targets.append(map[cursor.x+x-radius][cursor.y+y-radius])
             
 def grenade_cleanup(self):
         try:
@@ -464,10 +500,23 @@ class Item:
         else:
             if self.use_function() != 'cancelled':
                 inventory.remove(self.owner)
- 
+    def firestorm_grenade(self):
+        grenade_toss()
+        aoe_check(1, map_check=True)
+        on_fire = Status(4,Status.burning,Status.burning_clear,dot = True)
+        tile_burning = Status(4, Status.tile_burning, Status.tile_burning_clear)
+        for target in targets:
+            target.Status = on_fire
+            status_objects.append(target)
+        for map_target in map_targets:
+            map_target.Status = tile_burning
+            map_target.color = tcod.red
+            status_objects.append(map_target)
+        grenade_cleanup(self)
+        map_targets.clear()
     def frag_grenade(self):
         grenade_toss()
-        aoe_check(2,cursor)
+        aoe_check(2)
         damage = 4
         for target in targets:
             target.fighter.take_damage(damage)
@@ -476,11 +525,20 @@ class Item:
         grenade_cleanup(self)
     def poison_grenade(self):
         grenade_toss()
-        aoe_check(2,cursor)
+        aoe_check(2)
+        poison = Status(4, status_effect = Status.poison, status_clear_function= Status.poison_clear, dot = True)
         for target in targets:
-            poison = Status(4, status_effect = Status.poison, status_clear_function= Status.poison_clear, dot = True)
             target.Status = poison
-           
+            status_objects.append(target)
+        
+        grenade_cleanup(self)
+    def webbing_grenade(self):
+        grenade_toss()
+        aoe_check(3)
+        Webbed = Status(4, 'Webbed', Status.webbed_clear)
+        for target in targets:
+            target.Status = Webbed
+            status_objects.append(target)
         grenade_cleanup(self)
 
     def cast_heal():
@@ -493,13 +551,24 @@ class Item:
     def speed_up():
         Fast = Status(4,status_effect = Status.fast(inventory[item_selection].Item.user),status_clear_function = Status.fast_clear)
         inventory[item_selection].Item.user.Status = Fast
+        status_objects.append(inventory[item_selection].Item.user)
     def accuracy_up():
         Accurate = Status(4, status_effect =  Status.accurate(inventory[item_selection].Item.user), status_clear_function = Status.accurate_clear)
         inventory[item_selection].Item.user.Status = Accurate
+        status_objects.append(inventory[item_selection].Item.user)
     def time_stop_use():
         TimeStopped = Status(4, status_effect = Status.time_stop(inventory[item_selection].Item.user),status_clear_function = Status.time_stop_clear)
         inventory[item_selection].Item.user.Status = TimeStopped
-        
+        status_objects.append(inventory[item_selection].Item.user)
+    def stasis_grenade(self):
+        grenade_toss()
+        aoe_check(2)
+        for target in targets:
+            Slow = Status(4, target.speed, status_clear_function= Status.slow_clear)
+            target.Status = Slow
+            Status.slow(target, 0, 500000)
+            status_objects.append(target)
+        grenade_cleanup(self)
 
 
  
@@ -771,7 +840,7 @@ def render_all():
                     if wall:
                         tcod.console_set_char_background(con, x, y, color_light_wall, tcod.BKGND_SET)
                     else:
-                        tcod.console_set_char_background(con,x,y,color_light_ground,tcod.BKGND_SET)
+                        tcod.console_set_char_background(con,x,y,map[x][y].color,tcod.BKGND_SET)
                     map[x][y].explored=True
     #draw all objects in the list
     for object in objects:
@@ -850,6 +919,15 @@ def frag_grenade():
 def poison_grenade():
     poison_grenade = Object(0,0,'*','poison grenade',tcod.light_green, always_visible = True, Item=Item(throw_function = Item.poison_grenade))
     return poison_grenade
+def stasis_grenade():
+    stasis_grenade = Object(0,0,'*','stasis grenade',tcod.purple, always_visible = True, Item=Item(throw_function = Item.stasis_grenade))
+    return stasis_grenade
+def webbing_grenade():
+    webbing_grenade = Object(0,0,'*','webbing grenade',tcod.white, always_visible = True, Item=Item(throw_function = Item.webbing_grenade))
+    return webbing_grenade
+def firestorm_grenade():
+    firestorm_grenade = Object(0,0,'*','firestorm grenade',tcod.red, always_visible = True, Item=Item(throw_function = Item.firestorm_grenade))
+    return firestorm_grenade
 #WEAPONS
 def katana():
     katana = Object(0,0,'/','Katana',tcod.white, Item=Item(), Equipment=Equipment('right_hand'))
@@ -859,7 +937,7 @@ def katana():
 
 item_chances = (
     [0, katana],[0, healing_canister], [0, speed_canister], [0, accuracy_canister], [0, telepathy_canister], [0, displacement_canister], [0, object_detection_canister],
-    [0, time_stop_canister], [0, frag_grenade], [100, poison_grenade]
+    [0, time_stop_canister], [0, frag_grenade], [0, poison_grenade], [0, stasis_grenade], [0, webbing_grenade], [100, firestorm_grenade]
 )
 monster_chances = ([80, orc],[20, troll])
 item_table = []
@@ -1083,14 +1161,15 @@ def heap_refresh():
 
 def check_status_effects():
     global turn_counter
-    for object in objects:
+    for object in status_objects:
         if object.Status is not None:
-            if object.Status.end_time == turn_counter:
-                
+            if object.Status.end_time <= turn_counter:
                 Status.clear(object)
                 object.Status = None
             elif object.Status.dot is not False:
                     object.Status.status_effect(object)
+        else:
+            status_objects.remove(object)
             
 
 
