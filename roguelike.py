@@ -32,12 +32,15 @@ con = tcod.console_new(SCREEN_WIDTH,SCREEN_HEIGHT)
 panel = tcod.console_new(SCREEN_WIDTH, PANEL_HEIGHT)
 turn_counter = 0
 status_objects = []
-
+kill_counter = 0
+psi_powers = []
+room_counter = 0
+vaults = []
 class Object:
     #this is a generic object: the player, a monster, an item, the stairs...
     #it's always represented by a character on screen.
     def __init__(self, x, y, char, name, color, blocks=False, fighter=None, ai=None, Item=None, always_visible=False, speed=None, 
-    action_points=None, Equipment = None, Status = None, no_fog = False):
+    action_points=None, Equipment = None, Status = None, no_fog = False, Psionic_Charm = None):
         self.x = x
         self.y = y
         self.char = char
@@ -52,6 +55,8 @@ class Object:
         self.Equipment = Equipment
         self.Status = Status
         self.no_fog = no_fog
+        self.Psionic_Charm = Psionic_Charm
+        
         
         if self.fighter:  #let the fighter component know who owns it
             self.fighter.owner = self
@@ -67,6 +72,8 @@ class Object:
             self.Equipment.owner = self
         if self.Status:
             self.Status.owner = self
+        if self.Psionic_Charm:
+            self.Psionic_Charm.owner = self
 
     def move(self, dx, dy):
         #move by the given amount, if the destination is not blocked
@@ -210,13 +217,14 @@ class Object:
         if self.action_points is not None:
             if self.action_points > 0:
                 self.action_points -= 1000
-def shoot(self):
+def shoot(self, ammo_type, ammo_usage):
     message('Shoot what tile?',tcod.white)
     render_all()
     tcod.console_flush()
     Object.look(cursor)
     line = tcod.los.bresenham((player.x, player.y), (cursor.x, cursor.y)).tolist()
     valid_target = False
+    fired = False
     c = 0
     for i in line:
         if valid_target is True:
@@ -229,9 +237,16 @@ def shoot(self):
         if is_blocked(line_x, line_y) is True:
             for object in objects:
                 if line_x == object.x and line_y == object.y and object.fighter:
-                    self.fighter.shoot_attack(object)
                     valid_target = True
-                    break
+                    if ammo_type is 'bullet':
+                        player.fighter.bullets -= ammo_usage
+                        self.fighter.shoot_attack(object)
+                        fired = True
+                    else:
+                        player.fighter.energy -= ammo_usage
+                        self.fighter.shoot_attack(object)
+                        fired = True
+                    
             if c == 1:
                 continue
             valid_target = True
@@ -239,16 +254,48 @@ def shoot(self):
                     
 
 
-     
-    
-    try:
-        objects.remove(cursor)
-        player.action_points += player.speed
-    except:
-        print('Fire cancelled')
+    if valid_target is True:
+        try:
+            objects.remove(cursor)
+            self.action_points += self.speed
+        except:
+            print('Fire cancelled')
+    else:
+        try:
+            objects.remove(cursor)
+        except:
+            print('Fire cancelled')
+                
 
-            
-
+class Psi_Power:
+    def __init__ (self, name, cost, effect):
+        self.name = name
+        self.cost = cost
+        self.effect = effect
+    def Psi_Cast(self):
+        if self.cost <= player.fighter.will:
+            #self.effect(self)
+            return True
+        else:
+            message('You don\'t have enough will!')
+            return False
+    def Fireball(self):
+        will_check = Psi_Power.Psi_Cast(self)
+        if will_check is True:
+            message('Attack what tile?',tcod.white)
+            render_all()
+            tcod.console_flush()
+            Object.look(cursor)
+            aoe_check(2)
+            for i in targets:
+                i.fighter.take_damage(4)
+                message(str(player.name) + ' \'s fireball blasts ' + str(i.name) + ' for '+ str(4) + ' points of damage!' )
+            grenade_cleanup(self, False)
+    def Enhanced_Speed(self):
+        will_check = Psi_Cast(self)
+        if will_check is True:
+            Fast = Status(10,Status.fast(),Status.fast_clear)
+        
             
 
 class Status:
@@ -365,7 +412,7 @@ class Tile:
         self.Status = Status
  
 class Fighter:
-    def __init__(self, hp, defense, power, accuracy, shoot_accuracy = 0, death_function=None, shoot_power = 0, will = 0, dodge = 0):
+    def __init__(self, hp, defense, power, accuracy, shoot_accuracy = 0, death_function=None, shoot_power = 0, will = 0, dodge = 0, energy = 0, bullets = 0, energy_regen = 0):
         self.max_hp = hp
         self.hp = hp
         self.defense = defense
@@ -376,6 +423,11 @@ class Fighter:
         self.dodge = dodge
         self.accuracy = accuracy
         self.shoot_accuracy = shoot_accuracy
+        self.energy = energy
+        self.bullets = bullets
+        self.max_energy = energy
+        self.energy_regen = energy_regen
+
     def attack(self, target):
         hit_chance = self.accuracy - target.fighter.dodge
         hit_roll = tcod.random_get_int(0,0,100)
@@ -403,13 +455,23 @@ class Fighter:
             target.fighter.take_damage(damage)
         else:
             message (self.owner.name.capitalize() + ' shoots ' + target.name + ' but it has no effect!')
+        
     def take_damage (self, damage):
+        global kill_counter
         if damage > 0:
             self.hp -= damage
         if self.hp <= 0:
             function = self.death_function
             if function is not None:
                 function(self.owner)
+                kill_counter += 1
+                for items in inventory:
+                    if items.Psionic_Charm:
+                        if kill_counter >= items.Psionic_Charm.next_charge and items.Psionic_Charm.charges < items.Psionic_Charm.max_charges:
+                            items.Psionic_Charm.charges += 1
+                            items.Psionic_Charm.next_charge = items.Psionic_Charm.next_charge + items.Psionic_Charm.cooldown
+
+
     def heal (self, amount):
         self.hp += amount
         if self.hp > self.max_hp:
@@ -431,8 +493,23 @@ def monster_death(monster):
 class BasicMonster:
     def take_turn(self):
         monster = self.owner
+        c=0
         if tcod.map_is_in_fov(fov_map, monster.x, monster.y):
-            if monster.distance_to(player) >= 2:
+            if monster.fighter.shoot_power > 0:
+                line = tcod.los.bresenham((monster.x, monster.y), (player.x, player.y)).tolist()
+                for i in line:
+                    line_x = i[0]
+                    line_y = i[1]
+                    if c==0:
+                        c+=1
+                        continue
+                    if is_blocked(line_x, line_y):
+                        if line_x == player.x and line_y == player.y:
+                            monster.fighter.shoot_attack(player)
+                            break
+                        else:
+                            monster.move_astar(player)
+            elif monster.distance_to(player) >= 2:
                 if monster.Status is None or monster.Status.status_effect is not 'Webbed':
                     monster.move_astar(player)
             elif player.fighter.hp > 0:
@@ -465,13 +542,14 @@ def aoe_check(radius,map_check = False):
             for y in range ((radius*2+1)):
                 #if map[cursor.x-2][cursor.y-2] is Tile:
                 map_targets.append(map[cursor.x+x-radius][cursor.y+y-radius])
-            
-def grenade_cleanup(self):
+          
+def grenade_cleanup(self, item = True):
         try:
             targets.clear()
             objects.remove(cursor)
             player.action_points += player.speed
-            inventory.remove(self.owner)
+            if item is True:
+                inventory.remove(self.owner)
         except:
             print('Fire cancelled')
 def grenade_toss():
@@ -479,7 +557,21 @@ def grenade_toss():
     render_all()
     tcod.console_flush()
     Object.look(cursor)
-    
+class Psionic_Charm:
+    def __init__ (self, effect, cooldown, max_charges, charges = 0,  next_charge = 0):
+        self.effect = effect
+        self.charges = charges
+        self.max_charges = max_charges
+        self.cooldown = cooldown
+        self.next_charge = kill_counter+cooldown
+    def healing_charm(self):
+        if player.fighter.hp < player.fighter.max_hp:
+            player.fighter.hp += 5
+            message('The charm heals you for 5 hitpoints', tcod.red)
+        else:
+            message('You are already at full hp!', tcod.white)
+            self.Psionic_Charm.charges += 1
+
 class Item:
     def __init__ (self, use_function = None, throw_function = None, user = None):
         
@@ -488,7 +580,7 @@ class Item:
         self.throw_function = throw_function
         self.user = user
 
-
+    global kill_counter
     def use(self):
         if self.owner.Equipment:
             self.owner.Equipment.toggle_equip()
@@ -497,6 +589,14 @@ class Item:
             self.throw_function(self)
         elif self.use_function is None:
             message('The ' + self.owner.name + 'cannot be used.')
+        elif self.use_function is 'Wand':
+            if self.owner.Psionic_Charm.charges > 0:
+                if self.owner.Psionic_Charm.charges == self.owner.Psionic_Charm.max_charges:
+                    self.owner.Psionic_Charm.next_charge = self.owner.Psionic_Charm.cooldown + kill_counter
+                self.owner.Psionic_Charm.effect(self.owner)
+                self.owner.Psionic_Charm.charges -= 1
+            else:
+                message('Your charm is out of charges')
         else:
             if self.use_function() != 'cancelled':
                 inventory.remove(self.owner)
@@ -540,6 +640,18 @@ class Item:
             target.Status = Webbed
             status_objects.append(target)
         grenade_cleanup(self)
+    def teleport_grenade(self):
+        grenade_toss()
+        aoe_check(1)
+        for target in targets:
+            x = tcod.random_get_int(0,0,MAP_WIDTH) 
+            y = tcod.random_get_int(0,0, MAP_HEIGHT)
+            while is_blocked(x,y):
+                x = tcod.random_get_int(0,0,MAP_WIDTH) 
+                y = tcod.random_get_int(0,0, MAP_HEIGHT)
+            target.x = x
+            target.y = y
+        grenade_cleanup(self)
 
     def cast_heal():
         if user.fighter.hp == user.fighter.max_hp:
@@ -570,8 +682,11 @@ class Item:
             status_objects.append(target)
         grenade_cleanup(self)
 
-
- 
+    def fireball_injector():
+        Fireball__ = Psi_Power('Fireball', 5, effect = Psi_Power.Fireball)
+        psi_powers.append(Fireball__)
+    def speed_injector():
+        Speed = Psi_Power('Enhanced Speed', 5, effect = Status.fast)
     def pick_up(self):
         if len(inventory) >= 52:
             message('Your inventory is full!', tcod.white)
@@ -586,41 +701,54 @@ class Item:
   
         self.owner.x = player.x
         self.owner.y = player.y
+
  
 class Equipment:
     global equipment
-    def __init__ (self, slot):
+    def __init__ (self, slot, effect, amount, ammo_usage =  None, ammo_type = None):
         self.slot = slot
         self.is_equipped = False
-
+        self.effect = effect
+        self.amount = amount
+        self.ammo_usage = ammo_usage
+        self.ammo_type = ammo_type
+    
     def toggle_equip(self):
         if self.is_equipped:
             self.unequip()
         else:
             self.equip()
-
+    def power(amount):
+        player.fighter.power += amount
+    def shoot_power(amount):
+        player.fighter.shoot_power += amount
+    def defense(amount):
+        player.fighter.defense += amount
     def equip(self):
         self.is_equipped = True
         message('Equipped ' + self.owner.name + ' on ' + self.slot + '.', tcod.light_green)   
-        old_equipment = Equipment.slotequipped(self.slot)
-        
-        equipment.append(self)
+        if len(equipment[self.slot]) < slots_allowed[self.slot]:
+            equipment[self.slot].append(self)
+        else:
+            Equipment.unequip(equipment[self.slot][0])
+            equipment[self.slot].append(self)
         inventory.remove(self.owner)
+        
+        self.effect(self.amount)
 
-        if old_equipment is not None:
-            old_equipment.Equipment.unequip()
     def unequip(self):
         if not self.is_equipped: return
         self.is_equipped = False
         message('Unequipped ' + self.owner.name + ' from ' + self.slot + '.', tcod.yellow)
-        equipment.remove(self)
+        self.effect(self.amount*-1)
+        equipment[self.slot].remove(self)
         inventory.append(self.owner)           
     def slotequipped(slot):
         for obj in equipment:
-            if obj.slot == slot and obj.is_equipped:
+            if obj == slot:
                 return obj.owner
             return None 
-
+    
 
 
     
@@ -690,7 +818,8 @@ def handle_keys():
                             picked_up = False
                     if picked_up is not True:
                         message('Nothing to pick up!')
-                           
+                elif event.scancode == tcod.event.SCANCODE_M:
+                    psi_power_menu('---PSI POWERS---')
                 elif event.scancode == tcod.event.SCANCODE_I:
                     inventory_menu('---INVENTORY---')
                 elif event.scancode == tcod.event.SCANCODE_D:
@@ -700,7 +829,20 @@ def handle_keys():
                 elif event.scancode == tcod.event.SCANCODE_O:
                     print (event)
                 elif event.scancode == tcod.event.SCANCODE_F:
-                    shoot(player)
+                    if len(equipment['Ranged Weapon']) > 0:
+                        if equipment['Ranged Weapon'][0].ammo_type == 'bullet':
+                            if player.fighter.bullets >= equipment['Ranged Weapon'][0].ammo_usage:
+                                shoot(player, equipment['Ranged Weapon'][0].ammo_type, equipment['Ranged Weapon'][0].ammo_usage)
+                            else:
+                                message('You don\'t have enough bullets!', tcod.white)
+                        elif equipment['Ranged Weapon'][0].ammo_type == 'energy':
+                            if player.fighter.energy >= equipment['Ranged Weapon'][0].ammo_usage:
+                                shoot(player, equipment['Ranged Weapon'][0].ammo_type, equipment['Ranged Weapon'][0].ammo_usage)
+                            else:
+                                message('You don\'t have enough energy!', tcod.white)   
+                    else:
+                        message('You require a weapon to fire.')      
+
                 elif event.scancode == tcod.event.SCANCODE_F10:
                     save_game()
                     raise SystemExit()
@@ -708,6 +850,7 @@ def handle_keys():
                     Object.look(cursor)
             elif event.type != 'KEYDOWN':
                tcod.event.wait()
+
    
 def next_level():
     global dungeon_level, map
@@ -762,7 +905,7 @@ def createVTunnel(y1, y2, x):
  
  
 def make_map():
-    global map, stairs
+    global map, stairs, room_counter, vaults  
  
     #fill map with "unblocked" tiles
     map = [
@@ -811,6 +954,7 @@ def make_map():
             place_objects(newroom)
             rooms.append(newroom)
             num_rooms += 1
+            room_counter += 1
                 #create stairs at the center of the last room
     stairs = Object(new_x, new_y, '>', 'stairs', tcod.white, always_visible=True)
     objects.append(stairs)
@@ -888,7 +1032,12 @@ def orc():
     ai_component = BasicMonster()
     orc = Object(0, 0, 'o', 'orc', tcod.desaturated_green, blocks=True, fighter=fighter_component ,ai=ai_component, action_points=0, speed=1000)
     return orc
-monster_dict = {0:troll, 1:orc}
+def maga_drone():
+    fighter_component = Fighter(10,0,3, death_function = monster_death, accuracy = 50, shoot_power = 2, shoot_accuracy = 70)
+    ai_component = BasicMonster()
+    maga_drone = Object(0, 0, 'T', 'MAGA Drone', tcod.white, blocks=True, fighter=fighter_component ,ai=ai_component, action_points=0, speed=1000)
+    return maga_drone
+
 #ITEMS BLOCK
 #CANISTERS
 def healing_canister():
@@ -928,60 +1077,97 @@ def webbing_grenade():
 def firestorm_grenade():
     firestorm_grenade = Object(0,0,'*','firestorm grenade',tcod.red, always_visible = True, Item=Item(throw_function = Item.firestorm_grenade))
     return firestorm_grenade
+def teleport_grenade():
+    teleport_grenade = Object(0,0,'*','displacement grenade',tcod.blue, always_visible = True, Item=Item(throw_function = Item.teleport_grenade))
+    return teleport_grenade
 #WEAPONS
 def katana():
-    katana = Object(0,0,'/','Katana',tcod.white, Item=Item(), Equipment=Equipment('right_hand'))
+    katana = Object(0,0,'/','Katana',tcod.white, Item=Item(), Equipment=Equipment('Melee Weapon',Equipment.power, 4))
     return katana  
-
-
+def laser_pistol():
+    laser_pistol = Object(0,0,'/','Laser Pistol',tcod.green, Item=Item(), Equipment=Equipment('Ranged Weapon',Equipment.shoot_power, 4, 4, 'energy'))
+    return laser_pistol
+#PSIONIC_CHARMS
+def healing_charm():
+    healing_charm = Object(0,0,';', 'Healing Charm',
+     tcod.red, Item=Item(use_function = 'Wand'), Psionic_Charm= Psionic_Charm(effect = Psionic_Charm.healing_charm, max_charges = 3, 
+    cooldown = 2))
+    return healing_charm
+#PSIONIC_INJECTORS
+def fireball_injector():
+    fireball_injector = Object(0,0,'}','Psi Injector',tcod.red,always_visible = True, Item=Item(use_function = Item.fireball_injector))
+    return fireball_injector
+def speed_injector():
+    speed_injector = Object(0,0,'}','Psi Injector', tcod.violet, always_visible = True, Item=Item(use_function = Item.speed_injector))
+    return speed_injector
 
 item_chances = (
     [0, katana],[0, healing_canister], [0, speed_canister], [0, accuracy_canister], [0, telepathy_canister], [0, displacement_canister], [0, object_detection_canister],
-    [0, time_stop_canister], [0, frag_grenade], [0, poison_grenade], [0, stasis_grenade], [0, webbing_grenade], [100, firestorm_grenade]
+    [0, time_stop_canister], [0, frag_grenade], [0, poison_grenade], [0, stasis_grenade], [0, webbing_grenade], [0, firestorm_grenade], [0, teleport_grenade], [0, laser_pistol],
+    [0, healing_charm], [100, fireball_injector], [0, speed_injector]
 )
-monster_chances = ([80, orc],[20, troll])
+rare_item_chances = ([100, healing_charm], [0, katana])
+monster_chances = ([0, orc],[0, troll], [100, maga_drone])
 item_table = []
+rare_item_table = []
 monster_table = []
 for number_items_chances in range(len(item_chances)):
     for item_chance in range(item_chances[number_items_chances][0]):
         item_table.append(item_chances[number_items_chances][1])
+for number_items_chances in range(len(rare_item_chances)):
+    for item_chance in range(rare_item_chances[number_items_chances][0]):
+        rare_item_table.append(rare_item_chances[number_items_chances][1])
 for number_monster_chances in range(len(monster_chances)):
     for monster_chance in range(monster_chances[number_monster_chances][0]):
         monster_table.append(monster_chances[number_monster_chances][1])
 
 def place_objects(room):
-    
-    num_monsters = tcod.random_get_int(0,1, MAX_ROOM_MONSTERS)
-    Item.always_visible = True
-    for i in range (num_monsters):
-        random_number = tcod.random_get_int(0,0,99)
-        rng_monster = monster_table[random_number]()
-        x = tcod.random_get_int(0, room.x1+1, room.x2-1)
-        y = tcod.random_get_int(0, room.y1+1, room.y2-1)
-        rng_monster.x = x
-        rng_monster.y = y
-        while is_blocked(x,y):
+    if (room_counter/5).is_integer() is True and room_counter != 0:
+        for i in range(1):
+            random_number = tcod.random_get_int(0,0,99)
+            rng_item = rare_item_table[random_number]()
             x = tcod.random_get_int(0, room.x1+1, room.x2-1)
             y = tcod.random_get_int(0, room.y1+1, room.y2-1)
-       
-        
-        objects.append(rng_monster)
-  
-
-    num_items = tcod.random_get_int(0,2,MAX_ROOM_ITEMS)
-    for i in range(num_items):
-        random_number = tcod.random_get_int(0,0,99)
-        rng_item = item_table[random_number]()
-        x = tcod.random_get_int(0, room.x1+1, room.x2-1)
-        y = tcod.random_get_int(0, room.y1+1, room.y2-1)
-        rng_item.x=x
-        rng_item.y=y
-        while is_blocked (x,y):
-            x = tcod.random_get_int(0, room.x1+1, room.x2-1)
-            y = tcod.random_get_int(0, room.y1+1, room.y2-1)
+            rng_item.x=x
+            rng_item.y=y
+            while is_blocked (x,y):
+                x = tcod.random_get_int(0, room.x1+1, room.x2-1)
+                y = tcod.random_get_int(0, room.y1+1, room.y2-1)
         
         objects.append(rng_item)
         rng_item.send_to_back()
+    else:
+        num_monsters = tcod.random_get_int(0,1, MAX_ROOM_MONSTERS)
+        Item.always_visible = True
+        for i in range (num_monsters):
+            random_number = tcod.random_get_int(0,0,99)
+            rng_monster = monster_table[random_number]()
+            x = tcod.random_get_int(0, room.x1+1, room.x2-1)
+            y = tcod.random_get_int(0, room.y1+1, room.y2-1)
+            rng_monster.x = x
+            rng_monster.y = y
+            while is_blocked(x,y):
+                x = tcod.random_get_int(0, room.x1+1, room.x2-1)
+                y = tcod.random_get_int(0, room.y1+1, room.y2-1)
+        
+            
+            objects.append(rng_monster)
+    
+
+        num_items = tcod.random_get_int(0,2,MAX_ROOM_ITEMS)
+        for i in range(num_items):
+            random_number = tcod.random_get_int(0,0,99)
+            rng_item = item_table[random_number]()
+            x = tcod.random_get_int(0, room.x1+1, room.x2-1)
+            y = tcod.random_get_int(0, room.y1+1, room.y2-1)
+            rng_item.x=x
+            rng_item.y=y
+            while is_blocked (x,y):
+                x = tcod.random_get_int(0, room.x1+1, room.x2-1)
+                y = tcod.random_get_int(0, room.y1+1, room.y2-1)
+            
+            objects.append(rng_item)
+            rng_item.send_to_back()
 def render_bar (x, y, total_width, name, value, maximum, bar_color, back_color):
     status_width = int(float(value) / maximum * total_width)
  
@@ -1010,6 +1196,10 @@ def message(new_msg, color = tcod.white):
  
         #add the new line as a tuple, with the text and the color
     game_msgs.append((line,color))
+    render_all()
+    tcod.console_flush()
+    for object in objects:
+        object.clear()
 def menu(header,options,width):
     global key
     if len(options) > 26:
@@ -1079,15 +1269,28 @@ def inventory_menu(header):
         inventory[item_selection].Item.user = player
         inventory[item_selection].Item.use()
 def equipment_menu(header):
-    if len(equipment) == 0:
-        options =['You "don\'t have any equipment!']  
-    else:
-        options = [item.owner.name for item in equipment]
+    i = 0
+    options = []
+    equipment_lookup = []
+    for categories in equipment.values():
+        for items in categories:
+            if items.is_equipped is True:
+                options.append(items.owner.name)
+                equipment_lookup.append(items)
     index = menu(header,options,INVENTORY_WIDTH)
     item_selection = key - ord('a')
     if item_selection >= 0 and item_selection < len(options):
-        equipment[item_selection].toggle_equip()
- 
+        equipment_lookup[item_selection].toggle_equip()
+        equipment_lookup.clear()
+def psi_power_menu(header):
+    options = []
+    for powers in psi_powers:
+        options.append(powers.name)
+    index = menu(header,options,INVENTORY_WIDTH)
+    item_selection = key - ord('a')
+    if item_selection >= 0 and item_selection < len(options):
+        psi_powers[item_selection].effect(psi_powers[item_selection])
+
 def inventory_menu_drop(header):
     if len(inventory) == 0:
         options =['You "don\'t have any items!']  
@@ -1099,9 +1302,9 @@ def inventory_menu_drop(header):
         inventory[item_selection].Item.drop()
 
 def new_game():
-    global player, inventory, game_msgs, game_state, objects, cursor, dungeon_level, equipment
+    global player, inventory, game_msgs, game_state, objects, cursor, dungeon_level, equipment, slots_allowed
  
-    fighter_component = Fighter(5000,2,5, death_function = player_death, shoot_power = 4, accuracy = 100, dodge = 50, shoot_accuracy = 100)
+    fighter_component = Fighter(5000,2,5, death_function = player_death, shoot_power = 4, accuracy = 100, dodge = 50, shoot_accuracy = 100, bullets = 100, will = 100)
     player = Object(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2, '@','player', tcod.white, blocks=True, fighter=fighter_component, speed=1000, action_points=0)
     objects = [player]
    
@@ -1111,8 +1314,8 @@ def new_game():
     make_map()
     initialize_fov()
     inventory = []
-    equipment = []
-
+    equipment = {'Melee Weapon':[], 'Ranged Weapon':[], 'Armor':[],'Headgear':[], 'Implants':[]}
+    slots_allowed = {'Melee Weapon':1, 'Ranged Weapon':1, 'Armor':1, 'Headgear':1, 'Implants':4}
 def save_game():
     file = shelve.open('savegame', 'n')
     file['map']=map
